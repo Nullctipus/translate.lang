@@ -8,5 +8,7 @@ this was made to translate minecraft mods.
 ```
 
 This uses candle to download and load the quantized t5 model
-(Model)[https://huggingface.co/jbochi/madlad400-10b-mt]
-(Candle)[https://github.com/huggingface/candle]
+
+[Model](https://huggingface.co/jbochi/madlad400-10b-mt)
+
+[Candle](https://github.com/huggingface/candle)
