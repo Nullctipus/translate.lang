@@ -1,7 +1,13 @@
+/*
+ * Using the candle library to translate a file from one language to another.
+ * https://github.com/huggingface/candle
+ * https://github.com/huggingface/candle/blob/main/candle-examples/examples/quantized-t5/main.rs
+ */
+
 use regex::Regex;
 use std::env;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Write};
 
 #[cfg(feature = "mkl")]
 extern crate intel_mkl_src;
@@ -183,6 +189,15 @@ fn translate(
     Ok(result)
 }
 fn main() -> Result<()> {
+    use tracing_chrome::ChromeLayerBuilder;
+    use tracing_subscriber::prelude::*;
+
+    let _guard = {
+        let (chrome_layer, guard) = ChromeLayerBuilder::new().build();
+        tracing_subscriber::registry().with(chrome_layer).init();
+        Some(guard)
+    };
+
     let args: Vec<String> = env::args().collect();
 
     if args.len() != 4 && args.len() != 5 {
@@ -214,13 +229,6 @@ fn main() -> Result<()> {
     // Initialize translation model here (replace with actual initialization)
     // init('models/madlad400-10b-mt');
 
-    let mut output_position = 0;
-    if let Ok(output_file) = File::open(outfilename) {
-        let mut output_file = BufReader::new(output_file);
-        output_file.seek(SeekFrom::End(0))?;
-        output_position = output_file.stream_position()?;
-    }
-
     let en_regex = match Regex::new(EN_TEST) {
         Ok(regex) => regex,
         Err(err) => {
@@ -240,9 +248,17 @@ fn main() -> Result<()> {
         println!("{}", translated);
         return Ok(());
     }
-
+    let mut startline = 0;
+    {
+        let mut output_file = File::open(outfilename);
+        if output_file.is_ok() {
+            let output_file = BufReader::new(output_file?);
+            startline = output_file.lines().count();
+        }
+        println!("Starting at line {}", startline);
+    }
     let input_file = File::open(infilename)?;
-    let mut input_file = BufReader::new(input_file);
+    let input_file = BufReader::new(input_file);
 
     let mut output_file = OpenOptions::new()
         .write(true)
@@ -250,10 +266,13 @@ fn main() -> Result<()> {
         .create(true)
         .open(outfilename)?;
 
-    input_file.seek(SeekFrom::Start(output_position))?;
-
     let mut counter = 0;
     for line in input_file.lines() {
+        if counter < startline {
+            counter += 1;
+            continue;
+        }
+
         let line = line?;
         let line = line.trim();
 
@@ -287,7 +306,7 @@ fn main() -> Result<()> {
                     outlang,
                     value,
                 );
-                let translated = format!("{}{}", prefix, translated?);
+                let translated = format!("{}{}", prefix, translated?.trim());
                 println!(
                     "Translated {}={}{} to {}={}",
                     key, prefix, value, key, translated
