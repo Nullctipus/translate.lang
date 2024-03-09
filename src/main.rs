@@ -1,7 +1,7 @@
 use regex::Regex;
 use std::env;
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 
 #[cfg(feature = "mkl")]
 extern crate intel_mkl_src;
@@ -9,15 +9,18 @@ extern crate intel_mkl_src;
 #[cfg(feature = "accelerate")]
 extern crate accelerate_src;
 use candle_transformers::models::quantized_t5 as t5;
-use std::env::args;
+
 use std::path::PathBuf;
 
 use anyhow::{Error as E, Result};
 use candle_core::{Device, Tensor};
 use candle_transformers::generation::LogitsProcessor;
-use clap::{Parser, ValueEnum};
+use clap::ValueEnum;
 use hf_hub::{api::sync::Api, api::sync::ApiRepo, Repo, RepoType};
-use tokenizers::{Tokenizer, TokenizerImpl, ModelWrapper, NormalizerWrapper, PreTokenizerWrapper, PostProcessorWrapper, DecoderWrapper};
+use tokenizers::{
+    DecoderWrapper, ModelWrapper, NormalizerWrapper, PostProcessorWrapper, PreTokenizerWrapper,
+    Tokenizer, TokenizerImpl,
+};
 
 #[derive(Clone, Debug, Copy, ValueEnum)]
 enum Which {
@@ -80,7 +83,7 @@ impl T5ModelBuilder {
         };
         let config = std::fs::read_to_string(config_filename)?;
         let mut config: t5::Config = serde_json::from_str(&config)?;
-        config.use_cache = true;
+        config.use_cache = false;
         let tokenizer = Tokenizer::from_file(tokenizer_filename).map_err(E::msg)?;
         Ok((
             Self {
@@ -93,8 +96,7 @@ impl T5ModelBuilder {
     }
 
     pub fn build_model(&self) -> Result<t5::T5ForConditionalGeneration> {
-        let device = Device::Cpu;
-        let vb = t5::VarBuilder::from_gguf(&self.weights_filename, &device)?;
+        let vb = t5::VarBuilder::from_gguf(&self.weights_filename, &self.device)?;
         Ok(t5::T5ForConditionalGeneration::load(vb, &self.config)?)
     }
 
@@ -107,10 +109,17 @@ impl T5ModelBuilder {
         }
     }
 }
-const EN_TEST: &str = "^[a-zA-Z0-9\\s!#$%&'()*+,\\-\\./:;<=>?@[\\]^_`{|}~①-⑽§]*$";
+//const EN_TEST: &str = r"^[a-zA-Z0-9\s!#$%&'()*+,\-\./:;<=>?@[\]^_`{|}~①-⑽§]*$";
+const EN_TEST: &str = r"^[a-zA-Z0-9\s!#$%&'()*+,\-./:;<=>?@[\\]^_`{|}~①-⑽§]*$";
 
 fn translate(
-    tokenizer : &mut TokenizerImpl<ModelWrapper, NormalizerWrapper, PreTokenizerWrapper, PostProcessorWrapper, DecoderWrapper>,
+    tokenizer: &mut TokenizerImpl<
+        ModelWrapper,
+        NormalizerWrapper,
+        PreTokenizerWrapper,
+        PostProcessorWrapper,
+        DecoderWrapper,
+    >,
     builder: &T5ModelBuilder,
     model: &mut t5::T5ForConditionalGeneration,
     logits_processor: &mut LogitsProcessor,
@@ -118,7 +127,7 @@ fn translate(
     text: &str,
 ) -> Result<String> {
     let device = &builder.device;
-    let mut prompt: String = "<".to_owned();
+    let mut prompt: String = "<2".to_owned();
     prompt.push_str(lang);
     prompt.push_str(">");
     prompt.push_str(text);
@@ -168,7 +177,7 @@ fn translate(
             std::io::stdout().flush()?;
         }
     }
-    if (result.is_empty()) {
+    if result.is_empty() {
         result.push_str(text);
     }
     Ok(result)
@@ -176,7 +185,7 @@ fn translate(
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
 
-    if args.len() < 4 {
+    if args.len() != 4 && args.len() != 5 {
         eprintln!("Usage: {} <infilename> <outfilename> <outlang>", args[0]);
         std::process::exit(1);
     }
@@ -186,10 +195,10 @@ fn main() -> Result<()> {
     let outlang = &args[3];
 
     let (builder, mut tokenizer) = T5ModelBuilder::load(
-        Some("jbochi/madlad400-3b-mt".to_owned()),
+        Some("jbochi/madlad400-10b-mt".to_owned()),
         None,
         None,
-        Some("model-q4k.gguf".to_owned()),
+        Some("model-q6k.gguf".to_owned()),
         Which::T5Small,
     )?;
     let tokenizer = tokenizer
@@ -219,6 +228,18 @@ fn main() -> Result<()> {
             std::process::exit(1);
         }
     };
+    if args.len() == 5 {
+        let translated = translate(
+            tokenizer,
+            &builder,
+            &mut model,
+            &mut logits_processor,
+            outlang,
+            &args[4],
+        )?;
+        println!("{}", translated);
+        return Ok(());
+    }
 
     let input_file = File::open(infilename)?;
     let mut input_file = BufReader::new(input_file);
@@ -247,17 +268,30 @@ fn main() -> Result<()> {
             let mut parts = line.split('=');
             if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
                 let (prefix, value) = if value.starts_with('§') {
-                    let (prefix, value) = value.split_at(2);
-                    (prefix, &value[2..])
+                    let n = value
+                        .char_indices()
+                        .map(|x| x.0)
+                        .take(2 + 1)
+                        .last()
+                        .expect("empty sequence");
+                    let (prefix, value) = value.split_at(n);
+                    (prefix, value)
                 } else {
                     ("", value)
                 };
-                let translated = translate(tokenizer, &builder, &mut model, &mut logits_processor, outlang, value);
-                let translated = match translated { 
-                    Ok(x) => format!("{}{}", prefix, x),
-                    Err(_) => value.to_string(),
-                };
-                println!("Translated {}={} to {}={}", key, prefix, value, translated);
+                let translated = translate(
+                    tokenizer,
+                    &builder,
+                    &mut model,
+                    &mut logits_processor,
+                    outlang,
+                    value,
+                );
+                let translated = format!("{}{}", prefix, translated?);
+                println!(
+                    "Translated {}={}{} to {}={}",
+                    key, prefix, value, key, translated
+                );
                 writeln!(output_file, "{}={}", key, translated)?;
             }
         } else {
